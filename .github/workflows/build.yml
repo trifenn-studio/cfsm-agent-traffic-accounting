@@ -11,9 +11,11 @@ permissions:
 
 jobs:
   test:
+    if: github.repository == 'huilang-me/cfsm-agent'
     uses: ./.github/workflows/test.yml
 
   cross-compile-smoke:
+    if: github.repository == 'huilang-me/cfsm-agent'
     runs-on: ubuntu-latest
     needs: test
     steps:

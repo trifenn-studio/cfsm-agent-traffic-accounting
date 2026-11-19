@@ -15,9 +15,11 @@ concurrency:
 
 jobs:
   test:
+    if: github.repository == 'huilang-me/cfsm-agent'
     uses: ./.github/workflows/test.yml
 
   snapshot:
+    if: github.repository == 'huilang-me/cfsm-agent'
     needs: test
     runs-on: ubuntu-latest
     outputs:
@@ -155,6 +157,7 @@ jobs:
           done
 
   docker-snapshot:
+    if: github.repository == 'huilang-me/cfsm-agent'
     name: Publish snapshot Docker image
     runs-on: ubuntu-latest
     needs: snapshot

@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   test:
+    if: github.repository == 'huilang-me/cfsm-agent'
     strategy:
       fail-fast: false
       matrix:

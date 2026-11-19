@@ -10,9 +10,11 @@ permissions:
 
 jobs:
   test:
+    if: github.repository == 'huilang-me/cfsm-agent'
     uses: ./.github/workflows/test.yml
 
   build-and-upload:
+    if: github.repository == 'huilang-me/cfsm-agent'
     needs: test
     runs-on: ubuntu-latest
     steps:
