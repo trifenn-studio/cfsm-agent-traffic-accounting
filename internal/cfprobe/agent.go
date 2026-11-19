@@ -48,6 +48,7 @@ type Agent struct {
 	diskIO     DiskIOStats
 	monthlyRX  uint64
 	monthlyTX  uint64
+	traffic    *trafficAccountant
 	clock      calibratedClock
 
 	samples                  []metricSample
@@ -64,9 +65,9 @@ type Agent struct {
 	updateMu         sync.Mutex
 	// configWriteMu 串行化配置文件写入：动态配置下发与 UA 下发是两条独立通道，
 	// 并发写会把对方的字段覆盖回旧值。
-	configWriteMu    sync.Mutex
-	reporter         *reportTransport
-	reportMu         sync.Mutex
+	configWriteMu sync.Mutex
+	reporter      *reportTransport
+	reportMu      sync.Mutex
 	// reportFailures 是 WSS 与 POST 共用的连续失败计数：握手 401/403、WSS error 帧、
 	// POST 4xx/5xx、WS close 1008 都计入，任意一次成功（POST 2xx、非实时提示 ack、
 	// 或 WSS 握手通过）清零。
@@ -207,13 +208,18 @@ func (h rollingProbeHistory) snapshot(now time.Time) ProbeResult {
 	return ProbeResult{RTTMs: medianInt(values), Loss: loss, OK: true}
 }
 
-func Run(instance, configFile string, debug bool, version string) error {
+func runtimePaths(instance, configFile string) Paths {
 	paths := pathsForInstance(instance)
 	if configFile != "" {
 		paths.ConfigFile = configFile
 		paths.ConfigDir = filepath.Dir(configFile)
 		paths.TrafficFile = filepath.Join(paths.ConfigDir, "traffic.dat")
 	}
+	return paths
+}
+
+func Run(instance, configFile string, debug bool, version string) (runErr error) {
+	paths := runtimePaths(instance, configFile)
 	releaseLock, err := acquireInstanceLock(paths)
 	if err != nil {
 		return err
@@ -241,7 +247,19 @@ func Run(instance, configFile string, debug bool, version string) error {
 		wake:         make(chan struct{}, 1),
 		remoteConfig: make(chan remoteConfigRequest, 4),
 	}
-	a.resetNetworkBaseline(cfg.Interface)
+	if cfg.TrafficReport == "" {
+		a.resetNetworkBaseline(cfg.Interface)
+	} else {
+		a.traffic, err = openTrafficAccountant(paths, cfg)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := a.traffic.close(); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}()
+	}
 	a.reporter = newReportTransport(a)
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
@@ -281,13 +299,17 @@ func (a *Agent) loop(ctx context.Context) error {
 			a.log.info("probe stopped")
 			return nil
 		case <-timer.C:
-			a.tick()
+			if err := a.tick(); err != nil {
+				return err
+			}
 			if a.discoveryAbandoned() {
 				return ErrAutoDiscoveryFailed
 			}
 			resetTimer(timer, a.tickInterval())
 		case <-a.wake:
-			a.tick()
+			if err := a.tick(); err != nil {
+				return err
+			}
 			if a.discoveryAbandoned() {
 				return ErrAutoDiscoveryFailed
 			}
@@ -629,12 +651,12 @@ func autoDiscoveryFailureHint(code string) string {
 	}
 }
 
-func (a *Agent) tick() {
+func (a *Agent) tick() error {
 	now := time.Now()
 	if a.discoveryAbandoned() {
 		// 未绑定 id 且自动建号已中止：上报必然是 404，停止采样与上报。
 		a.samples = nil
-		return
+		return nil
 	}
 	if a.reportPauseRemaining(now) > 0 {
 		// 熔断期间停止采样与序列化，这是 CPU 的主要节省点。
@@ -642,7 +664,7 @@ func (a *Agent) tick() {
 		// 服务端按样本时间分桶时会出现错位数据。samples 只由本 goroutine 写入，
 		// 在这里清理不会与 transport 的失败计数产生竞争。
 		a.samples = nil
-		return
+		return nil
 	}
 	cfg := a.configSnapshot()
 	reportInterval := time.Duration(cfg.ReportInterval) * time.Second
@@ -663,7 +685,7 @@ func (a *Agent) tick() {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
 	}
 	if !shouldWSSReport && !shouldPostReport && !shouldSample {
-		return
+		return nil
 	}
 	reportDue := shouldWSSReport || shouldPostReport
 	fullDue := reportDue && (a.fullAt.IsZero() || now.Sub(a.fullAt) >= reportInterval)
@@ -673,8 +695,29 @@ func (a *Agent) tick() {
 	} else {
 		a.refreshRealtimeBasicStats()
 	}
-	netNow, netErr := readNetBytes(cfg.Interface)
-	netNow, rxSpeed, txSpeed := a.networkRates(now, netNow, netErr)
+	trafficInterface := cfg.Interface
+	var netNow NetBytes
+	var rxSpeed, txSpeed uint64
+	var netErr error
+	if a.traffic == nil {
+		netNow, netErr = readNetBytes(cfg.Interface)
+		netNow, rxSpeed, txSpeed = a.networkRates(now, netNow, netErr)
+	} else {
+		trafficInterface = a.traffic.state.NativeInterface
+		if fullDue {
+			if err := checkNativeTrafficBaseline(a.paths.TrafficFile, a.traffic.committed); err != nil {
+				return err
+			}
+		}
+		netNow, rxSpeed, txSpeed, netErr = a.traffic.sample(cfg, now, fullDue)
+		if netErr != nil {
+			var readErr *trafficReadError
+			if !errors.As(netErr, &readErr) {
+				return netErr
+			}
+			a.log.warnfOnce("traffic-read", "traffic counters unavailable; recovery will rebaseline: %v", netErr)
+		}
+	}
 
 	cpu := "0.00"
 	if usage, ok := readCPUPercent(); ok {
@@ -685,14 +728,17 @@ func (a *Agent) tick() {
 		// Failed reads must not replace the persisted counter baseline with zero.
 		if netErr == nil {
 			var err error
-			a.monthlyRX, a.monthlyTX, err = calcMonthlyTraffic(a.paths.TrafficFile, netNow, cfg.ResetDay, cfg.Interface)
+			a.monthlyRX, a.monthlyTX, err = calcMonthlyTraffic(a.paths.TrafficFile, netNow, cfg.ResetDay, trafficInterface)
 			if err != nil {
+				if a.traffic != nil {
+					return fmt.Errorf("monthly traffic checkpoint failed: %w", err)
+				}
 				a.log.warnfOnce("traffic-state", "monthly traffic checkpoint failed: %v", err)
 			}
 		} else if a.fullAt.IsZero() {
 			// Startup and configuration refresh must retain valid saved totals
 			// even if the first network read fails. Keep live cached totals later.
-			a.monthlyRX, a.monthlyTX = readMonthlyTrafficTotals(a.paths.TrafficFile, cfg.ResetDay, cfg.Interface, now)
+			a.monthlyRX, a.monthlyTX = readMonthlyTrafficTotals(a.paths.TrafficFile, cfg.ResetDay, trafficInterface, now)
 		}
 		a.diskIO = a.sampleDiskIO(now)
 		a.fullAt = now
@@ -704,6 +750,7 @@ func (a *Agent) tick() {
 	if shouldWSSReport || shouldPostReport {
 		a.applyReportResult(a.sendReport(cfg, m, shouldWSSReport, shouldPostReport, reportInterval), now)
 	}
+	return nil
 }
 
 func (a *Agent) resetNetworkBaseline(iface string) {
@@ -1309,6 +1356,9 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("wss_report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode") || values.Has("ping_mode") || values.Has("node_1") || values.Has("node_2") || values.Has("node_3") || values.Has("node_4")
 	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
 	cfg := a.configSnapshot()
+	if hasCorrection && cfg.TrafficReport != "" {
+		return errors.New("traffic accounting enabled: use traffic-seed for the initial counter origin")
+	}
 	if !hasConfig {
 		if hasCorrection {
 			rx := values.Get("rx_correction")
@@ -1358,6 +1408,10 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if err != nil {
 		return err
 	}
+	if cfg.TrafficReport != "" {
+		// 即使 WSS 下发没有 MD5，也对比实际生效的网卡筛选。
+		iface = cfg.Interface
+	}
 	connectionMode, err := normalizeConnectionMode(values.Get("connection_mode"))
 	if err != nil {
 		return err
@@ -1406,12 +1460,14 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		if writeErr != nil {
 			return writeErr
 		}
-		a.resetNetworkBaseline(nextCfg.Interface)
+		if cfg.TrafficReport == "" {
+			a.resetNetworkBaseline(nextCfg.Interface)
+			a.monthlyRX = 0
+			a.monthlyTX = 0
+		}
 		a.prevDisk = DiskIOCounters{}
 		a.prevDiskAt = time.Time{}
 		a.diskIO = DiskIOStats{}
-		a.monthlyRX = 0
-		a.monthlyTX = 0
 		a.fullAt = time.Time{}
 		a.samples = nil
 		a.lastSample = time.Time{}

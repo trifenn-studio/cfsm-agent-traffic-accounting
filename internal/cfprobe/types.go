@@ -39,14 +39,18 @@ type Config struct {
 	Node3           string
 	Node4           string
 	Interface       string
-	ResetDay        int
-	ConnectionMode  string
-	PingMode        string
+	// 流量计量使用显式的本地策略，包含 Interface 网卡筛选。
+	TrafficReport  string
+	TrafficExclude string
+	TrafficWeights string
+	ResetDay       int
+	ConnectionMode string
+	PingMode       string
 	// UA 是上报请求的自定义 User-Agent，由服务端通过独立通道下发（不参与 ConfigMD5 比对），
 	// 本地安装参数 -ua 只作为初值。
-	UA         string
-	AutoUpdate bool
-	UpdateProxy     string
+	UA          string
+	AutoUpdate  bool
+	UpdateProxy string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like
 	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
 	ConfigMD5 string
@@ -182,8 +186,8 @@ type MemoryStats struct {
 }
 
 type NetBytes struct {
-	RX uint64
-	TX uint64
+	RX uint64 `json:"rx"`
+	TX uint64 `json:"tx"`
 }
 
 type DiskDeviceRef struct {

@@ -73,6 +73,11 @@ func (a *Agent) autoUpdateWorker(ctx context.Context) {
 }
 
 func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
+	cfg := a.configSnapshot()
+	if cfg.TrafficReport != "" {
+		a.log.info("auto update skipped: local traffic accounting is enabled reason=%s", reason)
+		return
+	}
 	if runtime.GOOS == "darwin" {
 		if ok, ver := darwinUpdateSupported(); !ok {
 			a.log.info("auto update skipped: current builds require macOS 13 Ventura or later reason=%s version=%s macos=%s", reason, a.version, ver)
@@ -80,7 +85,6 @@ func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
 		}
 	}
 
-	cfg := a.configSnapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	candidate, ok, err := checkLatestUpdate(ctx, a.version, usePublicDNSResolver(cfg))
@@ -559,6 +563,9 @@ func ApplyScheduledUpdate(instance, buildVersion string) error {
 		return errors.New("scheduled upgrade apply is only supported on Windows")
 	}
 	paths := pathsForInstance(instance)
+	if cfg, _ := readConfig(paths.ConfigFile); cfg.TrafficReport != "" {
+		return errors.New("scheduled upstream update is disabled while local traffic accounting is enabled")
+	}
 	fmt.Printf("[INFO] applying scheduled update version=%s target=%s\n", buildVersion, paths.BinaryFile)
 	return applyWindowsScheduledUpdate(paths)
 }

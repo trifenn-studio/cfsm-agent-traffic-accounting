@@ -43,6 +43,8 @@ func Execute(args []string, buildVersion string) error {
 			return err
 		}
 		return ApplyScheduledUpdate(instance, buildVersion)
+	case "traffic-check", "traffic-status", "traffic-seed":
+		return executeTrafficCommand(args[0], args[1:], os.Stdout)
 	case "version", "-v", "--version":
 		fmt.Printf("CF-Server-Monitor Go Probe %s\n", buildVersion)
 		return nil
@@ -212,6 +214,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  cf-probe install -secret=SECRET -url=WORKER_URL [-name=NAME]   # 不传 -id，由服务端自动建号")
 	fmt.Fprintln(w, "  cf-probe run [-debug=0|1]")
 	fmt.Fprintln(w, "  cf-probe uninstall [-instance=NAME|--all]")
+	fmt.Fprintln(w, "  cf-probe traffic-check|traffic-status [-instance=NAME] [-config=FILE]")
+	fmt.Fprintln(w, "  cf-probe traffic-seed [-instance=NAME] [-config=FILE] -seed=FILE")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "安装选项:")
 	fmt.Fprintln(w, "  -instance=NAME       安装为独立实例，可与默认实例并存（如 eth1）；名称会转为小写，不传则覆盖默认实例")

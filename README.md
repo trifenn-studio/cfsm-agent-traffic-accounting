@@ -2,6 +2,8 @@
 
 `cfsm-agent` 是 CF-Server-Monitor 的 Go Probe Agent，安装后会以 `cf-probe` 服务运行，定时采集服务器资源、网络流量和探测数据，并上报到指定的 Worker 地址。
 
+本 fork 的 Linux 构建支持可选的[本地网卡筛选和流量倍率](docs/traffic.md)。
+
 ## 快速安装
 
 从面板或后台获取以下 3 个参数：

@@ -34,6 +34,9 @@ func Install(opts InstallOptions, version string) error {
 		opts.ConfigMD5 = "none"
 	}
 	normalizeConfigIntervals(&opts.Config)
+	if _, err := trafficPolicyForConfig(opts.Config); err != nil {
+		return err
+	}
 
 	// Validate and sample before stopping either the current or a legacy service.
 	correctionNet, err := prepareInstallTrafficCorrection(opts, readNetBytes)
@@ -103,6 +106,9 @@ func Install(opts InstallOptions, version string) error {
 func prepareInstallTrafficCorrection(opts InstallOptions, readCounters func(string) (NetBytes, error)) (NetBytes, error) {
 	if opts.RXCorrectionGB == "" && opts.TXCorrectionGB == "" {
 		return NetBytes{}, nil
+	}
+	if opts.TrafficReport != "" {
+		return NetBytes{}, errors.New("traffic accounting enabled: use traffic-seed for the initial counter origin")
 	}
 	if _, err := parseTrafficCorrectionGB(opts.RXCorrectionGB); err != nil {
 		return NetBytes{}, err

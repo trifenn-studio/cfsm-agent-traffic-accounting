@@ -163,7 +163,17 @@ func readConfig(path string) (Config, error) {
 	cfg.Node2 = values["NODE_2"]
 	cfg.Node3 = values["NODE_3"]
 	cfg.Node4 = values["NODE_4"]
-	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
+	iface, ifaceErr := normalizeInterfaceList(values["INTERFACE"])
+	cfg.Interface = iface
+	cfg.TrafficReport = values["TRAFFIC_REPORT"]
+	cfg.TrafficExclude = values["TRAFFIC_EXCLUDE"]
+	cfg.TrafficWeights = values["TRAFFIC_WEIGHTS"]
+	if cfg.TrafficReport != "" && ifaceErr != nil {
+		return cfg, ifaceErr
+	}
+	if _, err := trafficPolicyForConfig(cfg); err != nil {
+		return cfg, err
+	}
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
 	cfg.ConnectionMode, _ = normalizeConnectionMode(values["CONNECTION_MODE"])
 	cfg.PingMode, _ = normalizePingMode(values["PING_MODE"])
@@ -179,6 +189,9 @@ func readConfig(path string) (Config, error) {
 }
 
 func writeConfig(path string, cfg Config) error {
+	if _, err := trafficPolicyForConfig(cfg); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -202,6 +215,11 @@ func writeConfig(path string, cfg Config) error {
 	writeKV("NODE_3", cfg.Node3)
 	writeKV("NODE_4", cfg.Node4)
 	writeKV("INTERFACE", cfg.Interface)
+	if cfg.TrafficReport != "" {
+		writeKV("TRAFFIC_REPORT", cfg.TrafficReport)
+		writeKV("TRAFFIC_EXCLUDE", cfg.TrafficExclude)
+		writeKV("TRAFFIC_WEIGHTS", cfg.TrafficWeights)
+	}
 	writeKV("RESET_DAY", strconv.Itoa(cfg.ResetDay))
 	writeKV("CONNECTION_MODE", cfg.ConnectionMode)
 	writeKV("PING_MODE", cfg.PingMode)
